@@ -1,3 +1,6 @@
+use std::process::Command;
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
@@ -34,6 +37,7 @@ const BACK_TEMPLATE: &str = r#"{{FrontSide}}
 
 pub struct AnkiClient {
     url: String,
+    agent: ureq::Agent,
 }
 
 impl Default for AnkiClient {
@@ -41,21 +45,38 @@ impl Default for AnkiClient {
         Self {
             url: std::env::var("ANKI_CONNECT_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8765".into()),
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(15))
+                .build(),
         }
     }
 }
 
 impl AnkiClient {
+    fn post(&self, body: Value) -> Result<Value> {
+        self.agent
+            .post(&self.url)
+            .send_json(body)
+            .with_context(|| {
+                format!("failed to reach AnkiConnect at {} (is Anki running with AnkiConnect installed?)", self.url)
+            })?
+            .into_json()
+            .context("AnkiConnect returned a non-JSON response")
+    }
+
     fn invoke(&self, action: &str, params: Value) -> Result<Value> {
         let body = json!({ "action": action, "version": 6, "params": params });
-        let resp: Value = ureq::post(&self.url)
-            .send_json(body)
-            .with_context(|| format!("failed to reach AnkiConnect at {} (is Anki running with AnkiConnect installed?)", self.url))?
-            .into_json()?;
-        if let Some(err) = resp.get("error").filter(|e| !e.is_null()) {
-            bail!("AnkiConnect error for action `{action}`: {err}");
+        match self.post(body.clone()) {
+            Ok(resp) => unwrap_result(action, resp),
+            Err(first_err) => {
+                println!("AnkiConnect unreachable ({first_err:#}); launching Anki…");
+                launch_and_wait(&self.url)?;
+                let resp = self
+                    .post(body)
+                    .context("AnkiConnect did not come up after launching Anki")?;
+                unwrap_result(action, resp)
+            }
         }
-        Ok(resp["result"].clone())
     }
 
     pub fn version(&self) -> Result<String> {
@@ -93,13 +114,41 @@ impl AnkiClient {
         Ok(())
     }
 
+    fn note_exists(&self, deck: &str, word: &str) -> Result<bool> {
+        let query = format!(
+            "deck:\"{}\" Word:\"{}\"",
+            deck.replace('"', ""),
+            word.replace('"', "")
+        );
+        let result = self.invoke("findNotes", json!({ "query": query }))?;
+        let ids: Vec<i64> =
+            serde_json::from_value(result).context("unexpected findNotes response")?;
+        Ok(!ids.is_empty())
+    }
+
     pub fn add_notes(
         &self,
         deck: &str,
         tags: &[String],
         entries: &[VocabEntry],
     ) -> Result<(usize, usize)> {
-        let notes: Vec<Value> = entries
+        let mut seen = std::collections::HashSet::new();
+        let mut pending: Vec<&VocabEntry> = Vec::new();
+        let mut skipped = 0usize;
+
+        for e in entries {
+            if !seen.insert(e.word.as_str()) || self.note_exists(deck, &e.word)? {
+                skipped += 1;
+                continue;
+            }
+            pending.push(e);
+        }
+
+        if pending.is_empty() {
+            return Ok((0, skipped));
+        }
+
+        let notes: Vec<Value> = pending
             .iter()
             .map(|e| {
                 json!({
@@ -123,7 +172,47 @@ impl AnkiClient {
             serde_json::from_value(result).context("unexpected addNotes response")?;
 
         let added = results.iter().filter(|r| !r.is_null()).count();
-        let skipped = results.len() - added;
+        skipped += results.len() - added;
         Ok((added, skipped))
     }
+}
+
+fn unwrap_result(action: &str, resp: Value) -> Result<Value> {
+    if let Some(err) = resp.get("error").filter(|e| !e.is_null()) {
+        bail!("AnkiConnect error for action `{action}`: {err}");
+    }
+    Ok(resp["result"].clone())
+}
+
+#[cfg(target_os = "macos")]
+fn open_anki() -> Result<()> {
+    Command::new("open")
+        .args(["-a", "Anki"])
+        .status()
+        .context("failed to run `open -a Anki`")?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_anki() -> Result<()> {
+    bail!("automatic Anki launch is only implemented on macOS")
+}
+
+fn launch_and_wait(url: &str) -> Result<()> {
+    open_anki()?;
+    let probe = json!({ "action": "version", "version": 6 });
+    for _ in 0..120 {
+        std::thread::sleep(Duration::from_millis(500));
+        let client = AnkiClient {
+            url: url.to_string(),
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+        if client.post(probe.clone()).is_ok() {
+            println!("Anki is up");
+            return Ok(());
+        }
+    }
+    bail!("timed out waiting for AnkiConnect after launching Anki")
 }

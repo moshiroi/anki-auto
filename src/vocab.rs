@@ -28,8 +28,11 @@ pub fn load(path: Option<&Path>) -> Result<Vec<VocabEntry>> {
             buf
         }
     };
+    load_str(&raw)
+}
 
-    let value: Value = serde_json::from_str(&raw).context("input is not valid JSON")?;
+pub fn load_str(raw: &str) -> Result<Vec<VocabEntry>> {
+    let value: Value = serde_json::from_str(raw.trim()).context("input is not valid JSON")?;
     match value {
         Value::Array(_) => serde_json::from_value(value).context("invalid vocab list"),
         Value::Object(_) => serde_json::from_value(value)

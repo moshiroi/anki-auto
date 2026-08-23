@@ -44,6 +44,9 @@
             packages = [
               rustToolchain
               pkgs.rust-analyzer
+              (pkgs.writeShellScriptBin "aa" ''
+                exec cargo run --quiet -- "$@"
+              '')
             ];
 
             env = {
