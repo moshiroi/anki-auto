@@ -31,6 +31,9 @@ enum Command {
         /// Comma-separated tags for the notes
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
+        /// Provenance for this import batch, such as a video title or URL
+        #[arg(long)]
+        source: Option<String>,
         /// Parse and validate only, without touching Anki
         #[arg(long)]
         dry_run: bool,
@@ -46,6 +49,9 @@ enum Command {
         /// Comma-separated tags for the notes
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
+        /// Provenance tag applied to every watched batch
+        #[arg(long)]
+        source: Option<String>,
     },
 }
 
@@ -60,6 +66,7 @@ fn main() -> Result<()> {
             path,
             deck,
             tags,
+            source,
             dry_run,
         } => {
             let entries = vocab::load(path.as_deref())?;
@@ -67,10 +74,15 @@ fn main() -> Result<()> {
             if dry_run {
                 print_entries(&entries);
             } else {
-                report(push(&entries, &deck, &tags)?);
+                report(push(&entries, &deck, &tags, source.as_deref())?);
             }
         }
-        Command::Watch { inbox, deck, tags } => watch(&inbox, &deck, &tags)?,
+        Command::Watch {
+            inbox,
+            deck,
+            tags,
+            source,
+        } => watch(&inbox, &deck, &tags, source.as_deref())?,
     }
     Ok(())
 }
@@ -101,11 +113,16 @@ fn print_entries(entries: &[VocabEntry]) {
     }
 }
 
-fn push(entries: &[VocabEntry], deck: &str, tags: &[String]) -> Result<(usize, usize)> {
+fn push(
+    entries: &[VocabEntry],
+    deck: &str,
+    tags: &[String],
+    source: Option<&str>,
+) -> Result<(usize, usize)> {
     let client = AnkiClient::default();
     client.ensure_deck(deck)?;
     client.ensure_model()?;
-    client.add_notes(deck, tags, entries)
+    client.add_notes(deck, tags, source, entries)
 }
 
 fn report((added, skipped): (usize, usize)) {
@@ -133,7 +150,7 @@ fn archive(file: &Path, dir: &Path) -> Result<()> {
     std::fs::rename(file, &dest).with_context(|| format!("failed to archive {}", file.display()))
 }
 
-fn watch(inbox: &Path, deck: &str, tags: &[String]) -> Result<()> {
+fn watch(inbox: &Path, deck: &str, tags: &[String], source: Option<&str>) -> Result<()> {
     std::fs::create_dir_all(inbox)
         .with_context(|| format!("failed to create {}", inbox.display()))?;
     let imported = inbox.join("imported");
@@ -167,7 +184,7 @@ fn watch(inbox: &Path, deck: &str, tags: &[String]) -> Result<()> {
                 }
             };
 
-            match ensure_non_empty(&entries).and_then(|()| push(&entries, deck, tags)) {
+            match ensure_non_empty(&entries).and_then(|()| push(&entries, deck, tags, source)) {
                 Ok((added, skipped)) => {
                     println!(
                         "{}: {} added, {skipped} skipped (duplicates)",

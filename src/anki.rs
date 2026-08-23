@@ -130,6 +130,7 @@ impl AnkiClient {
         &self,
         deck: &str,
         tags: &[String],
+        source: Option<&str>,
         entries: &[VocabEntry],
     ) -> Result<(usize, usize)> {
         let mut seen = std::collections::HashSet::new();
@@ -148,9 +149,16 @@ impl AnkiClient {
             return Ok((0, skipped));
         }
 
+        let batch_source_tag = source
+            .filter(|value| !value.trim().is_empty())
+            .map(crate::vocab::source_tag);
         let notes: Vec<Value> = pending
             .iter()
             .map(|e| {
+                let mut note_tags = tags.to_vec();
+                if let Some(source_tag) = &batch_source_tag {
+                    note_tags.push(source_tag.clone());
+                }
                 json!({
                     "deckName": deck,
                     "modelName": MODEL_NAME,
@@ -161,7 +169,7 @@ impl AnkiClient {
                         "Sentence": crate::vocab::highlight(&e.word, &e.sentence),
                         "SentenceMeaning": e.sentence_meaning.clone().unwrap_or_default(),
                     },
-                    "tags": tags,
+                    "tags": note_tags,
                     "options": { "allowDuplicate": false },
                 })
             })

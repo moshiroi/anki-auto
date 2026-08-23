@@ -15,6 +15,11 @@ pub struct VocabEntry {
     pub sentence_meaning: Option<String>,
 }
 
+pub fn source_tag(source: &str) -> String {
+    let slug: String = source.split_whitespace().collect::<Vec<_>>().join("-");
+    format!("src::{slug}")
+}
+
 pub fn load(path: Option<&Path>) -> Result<Vec<VocabEntry>> {
     let raw = match path {
         Some(p) => {
@@ -113,6 +118,14 @@ mod tests {
         assert_eq!(
             highlight("食べる", "昨日寿司を食べました。"),
             "昨日寿司を<b>食べ</b>ました。"
+        );
+    }
+
+    #[test]
+    fn source_tag_slugs_spaces() {
+        assert_eq!(
+            source_tag("Comprehensible Japanese 旅"),
+            "src::Comprehensible-Japanese-旅"
         );
     }
 }
