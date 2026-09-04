@@ -8,6 +8,12 @@ use crate::vocab::VocabEntry;
 
 pub const MODEL_NAME: &str = "jp-vocab";
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct SourceSummary {
+    pub source: String,
+    pub note_count: usize,
+}
+
 const FIELDS: [&str; 5] = ["Word", "Reading", "Meaning", "Sentence", "SentenceMeaning"];
 
 const CSS: &str = r#"
@@ -81,6 +87,24 @@ impl AnkiClient {
 
     pub fn version(&self) -> Result<String> {
         Ok(self.invoke("version", json!({}))?.to_string())
+    }
+
+    pub fn sync(&self) -> Result<()> {
+        self.invoke("sync", json!({}))?;
+        Ok(())
+    }
+
+    pub fn sources(&self, deck: &str) -> Result<Vec<SourceSummary>> {
+        let query = format!("deck:\"{}\" tag:src::*", deck.replace('"', ""));
+        let result = self.invoke("findNotes", json!({ "query": query }))?;
+        let note_ids: Vec<i64> =
+            serde_json::from_value(result).context("unexpected findNotes response")?;
+        if note_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let result = self.invoke("notesInfo", json!({ "notes": note_ids }))?;
+        summarize_sources(result)
     }
 
     pub fn ensure_deck(&self, deck: &str) -> Result<()> {
@@ -192,6 +216,35 @@ fn unwrap_result(action: &str, resp: Value) -> Result<Value> {
     Ok(resp["result"].clone())
 }
 
+fn summarize_sources(notes: Value) -> Result<Vec<SourceSummary>> {
+    let notes = notes
+        .as_array()
+        .context("unexpected notesInfo response: expected an array")?;
+    let mut counts = std::collections::HashMap::<String, usize>::new();
+    for note in notes {
+        let tags = note
+            .get("tags")
+            .and_then(Value::as_array)
+            .context("unexpected notesInfo response: note has no tags array")?;
+        for tag in tags.iter().filter_map(Value::as_str) {
+            if tag.starts_with("src::") {
+                *counts.entry(tag.to_string()).or_default() += 1;
+            }
+        }
+    }
+
+    let mut sources: Vec<SourceSummary> = counts
+        .into_iter()
+        .map(|(source, note_count)| SourceSummary { source, note_count })
+        .collect();
+    sources.sort_by(|a, b| {
+        b.note_count
+            .cmp(&a.note_count)
+            .then_with(|| a.source.cmp(&b.source))
+    });
+    Ok(sources)
+}
+
 #[cfg(target_os = "macos")]
 fn open_anki() -> Result<()> {
     Command::new("open")
@@ -223,4 +276,58 @@ fn launch_and_wait(url: &str) -> Result<()> {
         }
     }
     bail!("timed out waiting for AnkiConnect after launching Anki")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unwraps_successful_response() {
+        assert_eq!(
+            unwrap_result("sync", json!({ "result": null, "error": null })).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn reports_anki_connect_errors_with_action() {
+        let error = unwrap_result(
+            "sync",
+            json!({ "result": null, "error": "sync requires authentication" }),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("action `sync`"));
+        assert!(error.to_string().contains("requires authentication"));
+    }
+
+    #[test]
+    fn summarizes_source_tags_by_frequency() {
+        let summaries = summarize_sources(json!([
+            { "tags": ["youtube", "src::Comprehensible-Japanese-https://youtu.be/one"] },
+            { "tags": ["src::Comprehensible-Japanese-https://youtu.be/one"] },
+            { "tags": ["src::Miku-Real-Japanese-https://youtu.be/two"] }
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            summaries,
+            vec![
+                SourceSummary {
+                    source: "src::Comprehensible-Japanese-https://youtu.be/one".into(),
+                    note_count: 2,
+                },
+                SourceSummary {
+                    source: "src::Miku-Real-Japanese-https://youtu.be/two".into(),
+                    note_count: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_notes_info_response() {
+        let error = summarize_sources(json!([{ "tags": null }])).unwrap_err();
+        assert!(error.to_string().contains("tags array"));
+    }
 }

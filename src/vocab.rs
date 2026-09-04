@@ -38,13 +38,41 @@ pub fn load(path: Option<&Path>) -> Result<Vec<VocabEntry>> {
 
 pub fn load_str(raw: &str) -> Result<Vec<VocabEntry>> {
     let value: Value = serde_json::from_str(raw.trim()).context("input is not valid JSON")?;
-    match value {
+    let entries = match value {
         Value::Array(_) => serde_json::from_value(value).context("invalid vocab list"),
         Value::Object(_) => serde_json::from_value(value)
             .map(|entry: VocabEntry| vec![entry])
             .context("invalid vocab entry"),
         _ => bail!("expected a JSON object or array of objects"),
+    }?;
+    validate(&entries)?;
+    Ok(entries)
+}
+
+fn validate(entries: &[VocabEntry]) -> Result<()> {
+    for (index, entry) in entries.iter().enumerate() {
+        for (field, value) in [
+            ("word", &entry.word),
+            ("reading", &entry.reading),
+            ("meaning", &entry.meaning),
+            ("sentence", &entry.sentence),
+        ] {
+            if value.trim().is_empty() {
+                bail!("entry {} has an empty `{field}` field", index + 1);
+            }
+        }
+        if entry
+            .sentence_meaning
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!(
+                "entry {} has an empty `sentence_meaning`; omit it instead",
+                index + 1
+            );
+        }
     }
+    Ok(())
 }
 
 fn find_with_stem_fallback(word: &str, sentence: &str) -> Option<(usize, usize)> {
@@ -127,5 +155,22 @@ mod tests {
             source_tag("Comprehensible Japanese 旅"),
             "src::Comprehensible-Japanese-旅"
         );
+    }
+
+    #[test]
+    fn rejects_empty_required_fields() {
+        let error =
+            load_str(r#"{"word":"","reading":"みず","meaning":"water","sentence":"水を飲む。"}"#)
+                .unwrap_err();
+        assert!(error.to_string().contains("empty `word`"));
+    }
+
+    #[test]
+    fn rejects_empty_optional_translation() {
+        let error = load_str(
+            r#"{"word":"水","reading":"みず","meaning":"water","sentence":"水を飲む。","sentence_meaning":" "}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("omit it instead"));
     }
 }
