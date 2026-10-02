@@ -1,4 +1,5 @@
 mod anki;
+mod cards;
 mod vocab;
 
 use std::path::{Path, PathBuf};
@@ -8,10 +9,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::anki::AnkiClient;
-use crate::vocab::VocabEntry;
+use crate::cards::Card;
 
 #[derive(Parser)]
-#[command(name = "anki-auto", about = "Automate Japanese Anki card creation")]
+#[command(name = "anki-auto", about = "Import JSON cards into Anki")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -32,13 +33,16 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Import vocab entries from a JSON file (or stdin if no file given)
+    /// Import card entries from a JSON file (or stdin if no file given)
     Import {
         /// Path to JSON file; omit to read from stdin
         path: Option<PathBuf>,
         /// Target deck (created if missing)
         #[arg(long, default_value = "Japanese")]
         deck: String,
+        /// Existing Anki note type; input keys must match its field names
+        #[arg(long)]
+        model: Option<String>,
         /// Comma-separated tags for the notes
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
@@ -60,6 +64,9 @@ enum Command {
         /// Target deck (created if missing)
         #[arg(long, default_value = "Japanese")]
         deck: String,
+        /// Existing Anki note type; input keys must match its field names
+        #[arg(long)]
+        model: Option<String>,
         /// Comma-separated tags for the notes
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
@@ -94,17 +101,25 @@ fn main() -> Result<()> {
             path,
             deck,
             tags,
+            model,
             source,
             dry_run,
             sync,
         } => {
-            let entries = vocab::load(path.as_deref())?;
+            let entries = cards::load(path.as_deref(), model.is_some())?;
             ensure_non_empty(&entries)?;
             if dry_run {
                 print_entries(&entries);
             } else {
                 let client = AnkiClient::default();
-                let counts = push(&client, &entries, &deck, &tags, source.as_deref())?;
+                let counts = push(
+                    &client,
+                    &entries,
+                    &deck,
+                    &tags,
+                    source.as_deref(),
+                    model.as_deref(),
+                )?;
                 report(counts);
                 if sync {
                     client.sync().context(
@@ -118,48 +133,52 @@ fn main() -> Result<()> {
             inbox,
             deck,
             tags,
+            model,
             source,
-        } => watch(&inbox, &deck, &tags, source.as_deref())?,
+        } => watch(&inbox, &deck, &tags, source.as_deref(), model.as_deref())?,
     }
     Ok(())
 }
 
-fn ensure_non_empty(entries: &[VocabEntry]) -> Result<()> {
+fn ensure_non_empty(entries: &[Card]) -> Result<()> {
     if entries.is_empty() {
-        bail!("no vocab entries found in input");
+        bail!("no card entries found in input");
     }
     Ok(())
 }
 
-fn print_entries(entries: &[VocabEntry]) {
+fn print_entries(entries: &[Card]) {
     println!(
         "parsed {} entr{}:",
         entries.len(),
         if entries.len() == 1 { "y" } else { "ies" }
     );
-    for e in entries {
+    for entry in entries {
         println!(
-            "  {} [{}] — {} ({})",
-            e.word,
-            e.reading,
-            e.meaning,
-            e.sentence_meaning
-                .as_deref()
-                .unwrap_or("no sentence translation")
+            "  {}",
+            serde_json::to_string(entry).expect("string fields serialize")
         );
     }
 }
 
 fn push(
     client: &AnkiClient,
-    entries: &[VocabEntry],
+    entries: &[Card],
     deck: &str,
     tags: &[String],
     source: Option<&str>,
+    model: Option<&str>,
 ) -> Result<(usize, usize)> {
+    let model_name = model.unwrap_or(anki::MODEL_NAME);
+    let fields = if model.is_some() {
+        client.model_fields(model_name)?
+    } else {
+        client.ensure_model()?;
+        client.model_fields(model_name)?
+    };
+    cards::validate_model(entries, &fields)?;
     client.ensure_deck(deck)?;
-    client.ensure_model()?;
-    client.add_notes(deck, tags, source, entries)
+    client.add_notes(deck, model_name, &fields[0], tags, source, entries)
 }
 
 fn report((added, skipped): (usize, usize)) {
@@ -187,7 +206,13 @@ fn archive(file: &Path, dir: &Path) -> Result<()> {
     std::fs::rename(file, &dest).with_context(|| format!("failed to archive {}", file.display()))
 }
 
-fn watch(inbox: &Path, deck: &str, tags: &[String], source: Option<&str>) -> Result<()> {
+fn watch(
+    inbox: &Path,
+    deck: &str,
+    tags: &[String],
+    source: Option<&str>,
+    model: Option<&str>,
+) -> Result<()> {
     std::fs::create_dir_all(inbox)
         .with_context(|| format!("failed to create {}", inbox.display()))?;
     let imported = inbox.join("imported");
@@ -207,7 +232,7 @@ fn watch(inbox: &Path, deck: &str, tags: &[String], source: Option<&str>) -> Res
         for file in files {
             let outcome = std::fs::read_to_string(&file)
                 .map_err(anyhow::Error::from)
-                .and_then(|raw| vocab::load_str(&raw));
+                .and_then(|raw| cards::load_str(&raw, model.is_some()));
 
             let entries = match outcome {
                 Ok(entries) => entries,
@@ -223,7 +248,7 @@ fn watch(inbox: &Path, deck: &str, tags: &[String], source: Option<&str>) -> Res
 
             let client = AnkiClient::default();
             match ensure_non_empty(&entries)
-                .and_then(|()| push(&client, &entries, deck, tags, source))
+                .and_then(|()| push(&client, &entries, deck, tags, source, model))
             {
                 Ok((added, skipped)) => {
                     println!(
@@ -247,6 +272,28 @@ fn watch(inbox: &Path, deck: &str, tags: &[String], source: Option<&str>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_model_is_supported_by_import_and_watch() {
+        for command in ["import", "watch"] {
+            let cli = Cli::try_parse_from([
+                "anki-auto",
+                command,
+                "--deck",
+                "Geography",
+                "--model",
+                "Basic",
+            ])
+            .unwrap();
+            match cli.command {
+                Command::Import { deck, model, .. } | Command::Watch { deck, model, .. } => {
+                    assert_eq!(deck, "Geography");
+                    assert_eq!(model.as_deref(), Some("Basic"));
+                }
+                _ => panic!("unexpected command"),
+            }
+        }
+    }
 
     #[test]
     fn import_accepts_sync_flag() {

@@ -2,6 +2,9 @@
 name = "anki-auto"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Import JSON cards into Anki through AnkiConnect"
+repository = "https://github.com/moshiroi/anki-auto"
 
 [dependencies]
 anyhow = "1"

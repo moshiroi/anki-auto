@@ -30,6 +30,12 @@ Treat a requested number `N` as the total number of newly added cards across all
 
 If Anki cannot launch or AnkiConnect remains unreachable, preserve the generated JSON and report its path plus the error. Do not claim cards were imported. Do not use watch mode for this one-shot workflow unless the user explicitly requests directory monitoring.
 
+## Custom decks and note types
+
+When the user requests cards for their own existing Anki note type, use `--deck <deck> --model "<note type>"` for both dry run and import. Generate an object or array whose keys exactly match that note type's field names and whose values are strings. The first field in Anki's field order is required and used for duplicate checking. Other fields can be omitted. Obtain the field names from available context or ask for them when unknown; never guess a schema. Keep source-grounding requirements for any source-based cards. Custom note types and templates are owned by Anki; do not create or modify them as part of an import.
+
+Without `--model`, the existing Japanese schema and automatically created `jp-vocab` model remain the default. Use explicit custom deck/model options on every invocation when selected by the user. Dry run validates custom JSON locally; the actual import checks field names against Anki before adding notes.
+
 ## Collection safety during development
 
 Never import into or sync the user's real collection while implementing or testing this project. Unit and integration tests must mock AnkiConnect or test pure response logic. Prefer `--dry-run` for CLI verification. `aa sources` is read-only, but tests should still exercise its response parsing without a live Anki instance. If a live end-to-end check is genuinely necessary and the user explicitly authorizes it, pass `--deck anki-auto-test`; never rely on the default `Japanese` deck. Production imports are allowed only in response to an actual user request to make or add cards.

@@ -1,6 +1,3 @@
-use std::io::Read;
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
@@ -18,22 +15,6 @@ pub struct VocabEntry {
 pub fn source_tag(source: &str) -> String {
     let slug: String = source.split_whitespace().collect::<Vec<_>>().join("-");
     format!("src::{slug}")
-}
-
-pub fn load(path: Option<&Path>) -> Result<Vec<VocabEntry>> {
-    let raw = match path {
-        Some(p) => {
-            std::fs::read_to_string(p).with_context(|| format!("failed to read {}", p.display()))?
-        }
-        None => {
-            let mut buf = String::new();
-            std::io::stdin()
-                .read_to_string(&mut buf)
-                .context("failed to read stdin")?;
-            buf
-        }
-    };
-    load_str(&raw)
 }
 
 pub fn load_str(raw: &str) -> Result<Vec<VocabEntry>> {
@@ -107,7 +88,7 @@ mod tests {
 
     #[test]
     fn parses_array() {
-        let entries = load(Some(Path::new("tests/fixtures/array.json"))).unwrap();
+        let entries = load_str(include_str!("../tests/fixtures/array.json")).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].word, "勉強");
         assert_eq!(entries[1].sentence_meaning, None);
@@ -115,7 +96,7 @@ mod tests {
 
     #[test]
     fn parses_single_object() {
-        let entries = load(Some(Path::new("tests/fixtures/single.json"))).unwrap();
+        let entries = load_str(include_str!("../tests/fixtures/single.json")).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].reading, "みず");
     }

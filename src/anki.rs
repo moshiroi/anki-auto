@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::vocab::VocabEntry;
+use crate::cards::Card;
 
 pub const MODEL_NAME: &str = "jp-vocab";
 
@@ -138,31 +138,45 @@ impl AnkiClient {
         Ok(())
     }
 
-    fn note_exists(&self, deck: &str, word: &str) -> Result<bool> {
-        let query = format!(
-            "deck:\"{}\" Word:\"{}\"",
-            deck.replace('"', ""),
-            word.replace('"', "")
-        );
-        let result = self.invoke("findNotes", json!({ "query": query }))?;
+    pub fn model_fields(&self, model: &str) -> Result<Vec<String>> {
+        let result = self.invoke("modelFieldNames", json!({ "modelName": model }))?;
+        serde_json::from_value(result).context("unexpected modelFieldNames response")
+    }
+
+    fn existing_keys(
+        &self,
+        deck: &str,
+        model: &str,
+        field: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let query = format!("deck:{} note:{}", search_quote(deck), search_quote(model));
         let ids: Vec<i64> =
-            serde_json::from_value(result).context("unexpected findNotes response")?;
-        Ok(!ids.is_empty())
+            serde_json::from_value(self.invoke("findNotes", json!({ "query": query }))?)
+                .context("unexpected findNotes response")?;
+        let mut keys = std::collections::HashSet::new();
+        // Bound the size of notesInfo requests for larger decks.
+        for chunk in ids.chunks(500) {
+            let result = self.invoke("notesInfo", json!({ "notes": chunk }))?;
+            keys.extend(note_keys(result, field)?);
+        }
+        Ok(keys)
     }
 
     pub fn add_notes(
         &self,
         deck: &str,
+        model: &str,
+        key_field: &str,
         tags: &[String],
         source: Option<&str>,
-        entries: &[VocabEntry],
+        entries: &[Card],
     ) -> Result<(usize, usize)> {
-        let mut seen = std::collections::HashSet::new();
-        let mut pending: Vec<&VocabEntry> = Vec::new();
+        let mut seen = self.existing_keys(deck, model, key_field)?;
+        let mut pending: Vec<&Card> = Vec::new();
         let mut skipped = 0usize;
 
         for e in entries {
-            if !seen.insert(e.word.as_str()) || self.note_exists(deck, &e.word)? {
+            if !seen.insert(e[key_field].clone()) {
                 skipped += 1;
                 continue;
             }
@@ -183,19 +197,7 @@ impl AnkiClient {
                 if let Some(source_tag) = &batch_source_tag {
                     note_tags.push(source_tag.clone());
                 }
-                json!({
-                    "deckName": deck,
-                    "modelName": MODEL_NAME,
-                    "fields": {
-                        "Word": e.word,
-                        "Reading": e.reading,
-                        "Meaning": e.meaning,
-                        "Sentence": crate::vocab::highlight(&e.word, &e.sentence),
-                        "SentenceMeaning": e.sentence_meaning.clone().unwrap_or_default(),
-                    },
-                    "tags": note_tags,
-                    "options": { "allowDuplicate": false },
-                })
+                note_payload(deck, model, e, note_tags)
             })
             .collect();
 
@@ -207,6 +209,44 @@ impl AnkiClient {
         skipped += results.len() - added;
         Ok((added, skipped))
     }
+}
+
+fn search_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn note_keys(notes: Value, field: &str) -> Result<std::collections::HashSet<String>> {
+    notes
+        .as_array()
+        .context("unexpected notesInfo response: expected an array")?
+        .iter()
+        .map(|note| {
+            note.get("fields")
+                .and_then(|fields| fields.get(field))
+                .and_then(|field| field.get("value"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .context("unexpected notesInfo response: missing duplicate field value")
+        })
+        .collect()
+}
+
+fn note_payload(deck: &str, model: &str, fields: &Card, tags: Vec<String>) -> Value {
+    json!({
+        "deckName": deck,
+        "modelName": model,
+        "fields": fields,
+        "tags": tags,
+        "options": {
+            "allowDuplicate": false,
+            "duplicateScope": "deck",
+            "duplicateScopeOptions": {
+                "deckName": deck,
+                "checkChildren": true,
+                "checkAllModels": false
+            }
+        },
+    })
 }
 
 fn unwrap_result(action: &str, resp: Value) -> Result<Value> {
@@ -281,6 +321,90 @@ fn launch_and_wait(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imports_custom_cards_with_scoped_exact_duplicates_and_provenance() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            let responses = [
+                json!([1]),
+                json!([{ "fields": { "Front": { "value": "already present" } } }]),
+                json!([42, null]),
+            ];
+            for result in responses {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(socket.try_clone().unwrap());
+                let mut size = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        size = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; size];
+                reader.read_exact(&mut body).unwrap();
+                requests.push(serde_json::from_slice::<Value>(&body).unwrap());
+                let response = json!({ "result": result, "error": null }).to_string();
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+            }
+            requests
+        });
+        let client = AnkiClient {
+            url,
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        };
+        let cards = crate::cards::load_str(
+            r#"[
+            {"Front":"already present","Back":"skip"},
+            {"Front":"new * value","Back":"keep <b>HTML</b>"},
+            {"Front":"new * value","Back":"batch duplicate"},
+            {"Front":"another","Back":"Anki rejects duplicate"}
+        ]"#,
+            true,
+        )
+        .unwrap();
+        let counts = client
+            .add_notes(
+                "My Deck",
+                "Basic",
+                "Front",
+                &["study".into()],
+                Some("My source"),
+                &cards,
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 3));
+        let requests = server.join().unwrap();
+        assert_eq!(
+            requests[0]["params"]["query"],
+            "deck:\"My Deck\" note:\"Basic\""
+        );
+        let notes = requests[2]["params"]["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0]["modelName"], "Basic");
+        assert_eq!(notes[0]["fields"]["Back"], "keep <b>HTML</b>");
+        assert_eq!(notes[0]["tags"], json!(["study", "src::My-source"]));
+        assert_eq!(notes[0]["options"]["duplicateScope"], "deck");
+    }
+
+    #[test]
+    fn rejects_missing_duplicate_values_in_anki_response() {
+        assert!(note_keys(json!([{ "fields": {} }]), "Front").is_err());
+    }
 
     #[test]
     fn unwraps_successful_response() {
