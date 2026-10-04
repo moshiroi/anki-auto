@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use crate::anki::AnkiClient;
+use crate::anki::{AnkiClient, ImportSummary};
 use crate::cards::Card;
 
 #[derive(Parser)]
@@ -120,7 +120,8 @@ fn main() -> Result<()> {
                     source.as_deref(),
                     model.as_deref(),
                 )?;
-                report(counts);
+                report(&counts);
+                counts.ensure_success()?;
                 if sync {
                     client.sync().context(
                         "notes were imported, but sync failed; retry with `anki-auto sync`",
@@ -168,7 +169,7 @@ fn push(
     tags: &[String],
     source: Option<&str>,
     model: Option<&str>,
-) -> Result<(usize, usize)> {
+) -> Result<ImportSummary> {
     let model_name = model.unwrap_or(anki::MODEL_NAME);
     let fields = if model.is_some() {
         client.model_fields(model_name)?
@@ -181,10 +182,17 @@ fn push(
     client.add_notes(deck, model_name, &fields[0], tags, source, entries)
 }
 
-fn report((added, skipped): (usize, usize)) {
-    println!("{added} added");
-    if skipped > 0 {
-        println!("{skipped} skipped (duplicates)");
+fn report(summary: &ImportSummary) {
+    println!("{} added", summary.added);
+    if summary.skipped > 0 {
+        println!("{} skipped (duplicates)", summary.skipped);
+    }
+    if !summary.failed_entries.is_empty() {
+        println!(
+            "{} failed (input entries {:?})",
+            summary.failed_entries.len(),
+            summary.failed_entries
+        );
     }
 }
 
@@ -249,12 +257,16 @@ fn watch(
             let client = AnkiClient::default();
             match ensure_non_empty(&entries)
                 .and_then(|()| push(&client, &entries, deck, tags, source, model))
-            {
-                Ok((added, skipped)) => {
+                .and_then(|summary| {
+                    summary.ensure_success()?;
+                    Ok(summary)
+                }) {
+                Ok(summary) => {
                     println!(
-                        "{}: {} added, {skipped} skipped (duplicates)",
+                        "{}: {} added, {} skipped (duplicates)",
                         file.display(),
-                        added
+                        summary.added,
+                        summary.skipped
                     );
                     archive(&file, &imported)?;
                 }

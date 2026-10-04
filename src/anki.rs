@@ -9,6 +9,28 @@ use crate::cards::Card;
 pub const MODEL_NAME: &str = "jp-vocab";
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct ImportSummary {
+    pub added: usize,
+    pub skipped: usize,
+    pub failed_entries: Vec<usize>,
+}
+
+impl ImportSummary {
+    pub fn ensure_success(&self) -> Result<()> {
+        if !self.failed_entries.is_empty() {
+            bail!(
+                "{} added, {} duplicates skipped, {} failed: Anki rejected input entries {:?}. Check their content and note templates in Anki. Successfully added notes are already local; after fixing the input, rerun the import (existing notes will be skipped). AnkiConnect addNotes does not provide individual rejection reasons.",
+                self.added,
+                self.skipped,
+                self.failed_entries.len(),
+                self.failed_entries
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct SourceSummary {
     pub source: String,
     pub note_count: usize,
@@ -170,21 +192,25 @@ impl AnkiClient {
         tags: &[String],
         source: Option<&str>,
         entries: &[Card],
-    ) -> Result<(usize, usize)> {
+    ) -> Result<ImportSummary> {
         let mut seen = self.existing_keys(deck, model, key_field)?;
-        let mut pending: Vec<&Card> = Vec::new();
+        let mut pending: Vec<(usize, &Card)> = Vec::new();
         let mut skipped = 0usize;
 
-        for e in entries {
+        for (index, e) in entries.iter().enumerate() {
             if !seen.insert(e[key_field].clone()) {
                 skipped += 1;
                 continue;
             }
-            pending.push(e);
+            pending.push((index + 1, e));
         }
 
         if pending.is_empty() {
-            return Ok((0, skipped));
+            return Ok(ImportSummary {
+                added: 0,
+                skipped,
+                failed_entries: Vec::new(),
+            });
         }
 
         let batch_source_tag = source
@@ -192,7 +218,7 @@ impl AnkiClient {
             .map(crate::vocab::source_tag);
         let notes: Vec<Value> = pending
             .iter()
-            .map(|e| {
+            .map(|(_, e)| {
                 let mut note_tags = tags.to_vec();
                 if let Some(source_tag) = &batch_source_tag {
                     note_tags.push(source_tag.clone());
@@ -202,13 +228,40 @@ impl AnkiClient {
             .collect();
 
         let result = self.invoke("addNotes", json!({ "notes": notes }))?;
-        let results: Vec<Value> =
-            serde_json::from_value(result).context("unexpected addNotes response")?;
-
-        let added = results.iter().filter(|r| !r.is_null()).count();
-        skipped += results.len() - added;
-        Ok((added, skipped))
+        summarize_import(
+            result,
+            &pending.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            skipped,
+        )
     }
+}
+
+fn summarize_import(
+    result: Value,
+    input_indices: &[usize],
+    skipped: usize,
+) -> Result<ImportSummary> {
+    let results = result.as_array().context(
+        "unexpected addNotes response: expected an array; some notes may already be local",
+    )?;
+    if results.len() != input_indices.len()
+        || results
+            .iter()
+            .any(|value| !value.is_null() && value.as_i64().is_none_or(|id| id <= 0))
+    {
+        bail!(
+            "unexpected addNotes response: invalid result count or note IDs; some notes may already be local"
+        );
+    }
+    Ok(ImportSummary {
+        added: results.iter().filter(|value| !value.is_null()).count(),
+        skipped,
+        failed_entries: results
+            .iter()
+            .zip(input_indices)
+            .filter_map(|(value, index)| value.is_null().then_some(*index))
+            .collect(),
+    })
 }
 
 fn search_quote(value: &str) -> String {
@@ -372,7 +425,7 @@ mod tests {
             {"Front":"already present","Back":"skip"},
             {"Front":"new * value","Back":"keep <b>HTML</b>"},
             {"Front":"new * value","Back":"batch duplicate"},
-            {"Front":"another","Back":"Anki rejects duplicate"}
+            {"Front":"another","Back":"Anki rejects this note"}
         ]"#,
             true,
         )
@@ -387,7 +440,21 @@ mod tests {
                 &cards,
             )
             .unwrap();
-        assert_eq!(counts, (1, 3));
+        assert_eq!(
+            counts,
+            ImportSummary {
+                added: 1,
+                skipped: 2,
+                failed_entries: vec![4]
+            }
+        );
+        assert!(
+            counts
+                .ensure_success()
+                .unwrap_err()
+                .to_string()
+                .contains("input entries [4]")
+        );
         let requests = server.join().unwrap();
         assert_eq!(
             requests[0]["params"]["query"],
@@ -399,6 +466,47 @@ mod tests {
         assert_eq!(notes[0]["fields"]["Back"], "keep <b>HTML</b>");
         assert_eq!(notes[0]["tags"], json!(["study", "src::My-source"]));
         assert_eq!(notes[0]["options"]["duplicateScope"], "deck");
+    }
+
+    #[test]
+    fn reports_all_rejected_notes_as_failures() {
+        let summary = summarize_import(json!([null, null]), &[2, 5], 1).unwrap();
+        assert_eq!(
+            summary,
+            ImportSummary {
+                added: 0,
+                skipped: 1,
+                failed_entries: vec![2, 5]
+            }
+        );
+        assert!(summary.ensure_success().is_err());
+    }
+
+    #[test]
+    fn successful_import_has_no_failures() {
+        let summary = summarize_import(json!([42, 43]), &[1, 3], 1).unwrap();
+        assert_eq!(
+            summary,
+            ImportSummary {
+                added: 2,
+                skipped: 1,
+                failed_entries: vec![]
+            }
+        );
+        summary.ensure_success().unwrap();
+    }
+
+    #[test]
+    fn rejects_malformed_import_responses() {
+        for response in [
+            json!([]),
+            json!(["42"]),
+            json!([false]),
+            json!([0]),
+            json!({}),
+        ] {
+            assert!(summarize_import(response, &[1], 0).is_err());
+        }
     }
 
     #[test]

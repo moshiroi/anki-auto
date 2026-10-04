@@ -24,7 +24,8 @@ pub fn load(path: Option<&Path>, custom: bool) -> Result<Vec<Card>> {
 
 pub fn load_str(raw: &str, custom: bool) -> Result<Vec<Card>> {
     if !custom {
-        return Ok(crate::vocab::load_str(raw)?
+        return Ok(crate::vocab::load_str(raw)
+            .context("without --model, input must use the Japanese vocabulary format. For an existing Anki note type, pass --model, e.g. --model Basic for Front/Back fields")?
             .into_iter()
             .map(|entry| {
                 Card::from([
@@ -121,6 +122,13 @@ mod tests {
             let cards = load_str(raw, true).unwrap();
             assert!(validate_model(&cards, &["Front".into(), "Back".into()]).is_err());
         }
+    }
+
+    #[test]
+    fn suggests_model_flag_for_basic_input_without_model() {
+        let error = load_str(r#"{"Front":"hello","Back":"bonjour"}"#, false).unwrap_err();
+        assert!(format!("{error:#}").contains("--model Basic"));
+        assert!(load_str(r#"{"Front":"hello","Back":"bonjour"}"#, true).is_ok());
     }
 
     #[test]

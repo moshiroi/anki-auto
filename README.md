@@ -2,26 +2,55 @@
 
 `anki-auto` imports JSON cards into your Anki decks through AnkiConnect. Use any existing note type with `--model`, or use the built-in Japanese vocabulary format. It validates input, skips duplicates, tags source provenance, and optionally syncs. No AI API key or hosted service is needed.
 
-## Prerequisites
+## Get your first card into Anki
 
-- Anki installed with the AnkiConnect add-on enabled (add-on code `2055492159`)
-- AnkiWeb configured in Anki if you want sync
-- Rust with Cargo, or Nix for the development shell
-- For the Codex YouTube workflow: an awake laptop, internet access, and Codex opened in this project
+### 1. Set up Anki
 
-Anki does not have to be open initially: on macOS the CLI attempts to launch it and waits for AnkiConnect. This is laptop-local automation and does not run while the laptop is asleep.
+Install [Anki Desktop](https://apps.ankiweb.net/), then open it. In **Tools → Add-ons → Get Add-ons**, enter `2055492159` to install [AnkiConnect](https://ankiweb.net/shared/info/2055492159). Restart Anki after installing the add-on and leave it open.
 
-## Quick start with your own deck
+AnkiWeb is optional: you can import and review cards locally without an account. Configure AnkiWeb later if you want cards on other devices.
 
-Clone this repository, then install the CLI from its directory:
+### 2. Install the tool
+
+For now, installation builds from source. Install [Git](https://git-scm.com/downloads) and [Rust and Cargo](https://www.rust-lang.org/tools/install) for your operating system and follow the installer's compiler/toolchain instructions. Reopen your terminal afterward, then check `cargo --version`.
 
 ```sh
+git clone https://github.com/moshiroi/anki-auto.git
+cd anki-auto
 cargo install --path . --locked
+anki-auto --help
 ```
 
-Alternatively, `nix develop` provides Rust and the `aa` shortcut for `cargo run --quiet --`. Examples below using `aa` also work with the installed `anki-auto` command.
+If `anki-auto` is not found, ensure Cargo's bin directory is on PATH: `~/.cargo/bin` on macOS/Linux or `%USERPROFILE%\.cargo\bin` on Windows. The Rust installer normally configures this; reopening your terminal may be enough.
 
-Create `cards.json` with keys matching your Anki note type's field names exactly (including capitalization). For the standard `Basic` note type:
+Nix users can instead run `nix develop`; this provides Rust and an `aa` shortcut. Use `aa` wherever the examples say `anki-auto`.
+
+### 3. Check the connection
+
+Keep Anki open and run:
+
+```sh
+anki-auto ping
+```
+
+You should see `connected to AnkiConnect` followed by its version. If it fails, check that AnkiConnect is enabled under **Tools → Add-ons**, restart Anki, and try again. `--dry-run` only checks input; it does not check this connection.
+
+### 4. Import the included example
+
+From the cloned repository directory, use the supplied Basic-card JSON file—no need to write your own yet:
+
+```sh
+anki-auto import tests/fixtures/basic.json --deck Geography --model Basic --dry-run
+anki-auto import tests/fixtures/basic.json --deck Geography --model Basic
+```
+
+Expect `parsed 1 entry` from the dry run and `1 added` from the import. Open the **Geography** deck in Anki to review your first card. Repeating the import reports `0 added` and `1 skipped (duplicates)`.
+
+If your note type is named differently, find its name under **Tools → Manage Note Types** and replace `Basic` with that exact name. The included example needs `Front` and `Back` fields.
+
+### 5. Make your own cards
+
+Create `cards.json` with keys matching your note type's field names exactly (including capitalization). For standard `Basic`:
 
 ```json
 [
@@ -31,8 +60,10 @@ Create `cards.json` with keys matching your Anki note type's field names exactly
 
 ```sh
 anki-auto import cards.json --deck Geography --model Basic --dry-run
-anki-auto import cards.json --deck Geography --model Basic --source "Geography notes" --sync
+anki-auto import cards.json --deck Geography --model Basic --source "Geography notes"
 ```
+
+When AnkiWeb is configured, sync separately with `anki-auto sync` or add `--sync` to an import. A sync error does not undo a successful local import; retry with `anki-auto sync`.
 
 The deck is created if needed. The note type must already exist in Anki; its templates and styling control how cards look. Custom input values are strings passed through unchanged, including Anki HTML, cloze markup, and existing media references. Media uploading is not included.
 
@@ -54,7 +85,7 @@ AnkiConnect defaults to `http://127.0.0.1:8765`; override it with `ANKI_CONNECT_
 
 Find your exact note type name under **Tools → Manage Note Types** in Anki; select it and click **Fields** to see its field names and order. Names may differ if you renamed them or use another interface language. These examples assume the standard English names described in the [Anki manual](https://docs.ankiweb.net/getting-started.html#note-types).
 
-Save each JSON example to the filename shown in its command. Run the command with `--dry-run` first, then replace `--dry-run` with `--sync` to import and sync. Counts reported by the CLI are **notes**, which can generate more than one review card.
+Save each JSON example to the filename shown in its command. Run the command with `--dry-run` first, then remove `--dry-run` to import. Add `--sync` only if AnkiWeb is configured. Counts reported by the CLI are **notes**, which can generate more than one review card.
 
 The images below are browser-rendered previews of the example data, with the question on the left and revealed answer on the right. Standard examples follow [Anki's stock templates](https://github.com/ankitects/anki/blob/main/rslib/src/notetype/stock.rs); the custom template is illustrative. Your templates, theme, and device can change the appearance.
 
@@ -203,6 +234,8 @@ aa sources --deck Japanese --limit 10
 printf '%s\n' "$CARDS_JSON" | aa import --source "source name"
 aa watch --inbox inbox --tags youtube
 ```
+
+If Anki rejects individual notes, the CLI reports them as failures with their input entry numbers and exits with an error. Successfully added notes remain local. Fix the rejected entries and rerun the import; existing notes are skipped. Sync does not run after a partial failure. Watch mode moves partially failed batches to `failed/` so they can be fixed and retried.
 
 If notes import successfully but sync fails, the CLI reports the imported counts, exits with an error, and directs you to retry with `aa sync`. The already-imported notes are not rolled back.
 
