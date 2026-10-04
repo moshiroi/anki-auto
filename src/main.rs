@@ -12,7 +12,7 @@ use crate::anki::{AnkiClient, ImportSummary};
 use crate::cards::Card;
 
 #[derive(Parser)]
-#[command(name = "anki-auto", about = "Import JSON cards into Anki")]
+#[command(name = "anki-auto", version, about = "Import JSON cards into Anki")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

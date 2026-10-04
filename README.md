@@ -12,7 +12,41 @@ AnkiWeb is optional: you can import and review cards locally without an account.
 
 ### 2. Install the tool
 
-For now, installation builds from source. Install [Git](https://git-scm.com/downloads) and [Rust and Cargo](https://www.rust-lang.org/tools/install) for your operating system and follow the installer's compiler/toolchain instructions. Reopen your terminal afterward, then check `cargo --version`.
+No Rust, Nix, or administrator access is needed for the [downloadable binaries](https://github.com/moshiroi/anki-auto/releases/latest).
+
+**macOS / Linux** — paste this into Terminal (bash or zsh):
+
+```sh
+curl -fsSL https://github.com/moshiroi/anki-auto/releases/latest/download/install.sh | sh
+export PATH="$HOME/.local/share/anki-auto:$PATH"
+anki-auto --version
+```
+
+**Windows x64** — paste this into PowerShell:
+
+```powershell
+Invoke-RestMethod https://github.com/moshiroi/anki-auto/releases/latest/download/install.ps1 | Invoke-Expression
+anki-auto --version
+```
+
+The installer detects your platform, verifies the archive checksum, and installs into your user folder. It updates PATH for future terminals (bash/zsh on macOS/Linux; user PATH on Windows). The Unix `export` above makes the command available in your current terminal too. Run the same installer again to update.
+
+| Platform | Archive | Installer location |
+| --- | --- | --- |
+| macOS 13+, Apple Silicon | `anki-auto-aarch64-apple-darwin.tar.gz` | `~/.local/share/anki-auto` |
+| macOS 13+, Intel | `anki-auto-x86_64-apple-darwin.tar.gz` | `~/.local/share/anki-auto` |
+| Linux x64 | `anki-auto-x86_64-unknown-linux-musl.tar.gz` | `~/.local/share/anki-auto` |
+| Linux ARM64 | `anki-auto-aarch64-unknown-linux-musl.tar.gz` | `~/.local/share/anki-auto` |
+| Windows x64 | `anki-auto-x86_64-pc-windows-msvc.zip` | `%LOCALAPPDATA%\anki-auto` |
+
+Prefer a manual download? Extract the matching archive from [Releases](https://github.com/moshiroi/anki-auto/releases/latest). It contains the binary, `basic.json`, the MIT license, and instructions. You can run the binary directly from that folder (`./anki-auto --help` or `.\anki-auto.exe --help`) without changing PATH.
+
+macOS builds are not Apple-notarized. If macOS blocks a manually downloaded binary, use its **Privacy & Security → Open Anyway** option for this download. [Apple's instructions](https://support.apple.com/en-us/102445) explain the process. Do not disable Gatekeeper globally.
+
+<details>
+<summary>Build from source instead</summary>
+
+Install [Git](https://git-scm.com/downloads) and [Rust and Cargo](https://www.rust-lang.org/tools/install) for your operating system. Reopen your terminal afterward, then check `cargo --version`.
 
 ```sh
 git clone https://github.com/moshiroi/anki-auto.git
@@ -21,9 +55,9 @@ cargo install --path . --locked
 anki-auto --help
 ```
 
-If `anki-auto` is not found, ensure Cargo's bin directory is on PATH: `~/.cargo/bin` on macOS/Linux or `%USERPROFILE%\.cargo\bin` on Windows. The Rust installer normally configures this; reopening your terminal may be enough.
+If `anki-auto` is not found, ensure Cargo's bin directory is on PATH: `~/.cargo/bin` on macOS/Linux or `%USERPROFILE%\.cargo\bin` on Windows. Nix users can instead run `nix develop`; this provides Rust and an `aa` shortcut. Use `aa` wherever the examples say `anki-auto`.
 
-Nix users can instead run `nix develop`; this provides Rust and an `aa` shortcut. Use `aa` wherever the examples say `anki-auto`.
+</details>
 
 ### 3. Check the connection
 
@@ -37,12 +71,23 @@ You should see `connected to AnkiConnect` followed by its version. If it fails, 
 
 ### 4. Import the included example
 
-From the cloned repository directory, use the supplied Basic-card JSON file—no need to write your own yet:
+The installer includes a sample—no need to write your own JSON yet.
+
+**macOS / Linux:**
 
 ```sh
-anki-auto import tests/fixtures/basic.json --deck Geography --model Basic --dry-run
-anki-auto import tests/fixtures/basic.json --deck Geography --model Basic
+anki-auto import "$HOME/.local/share/anki-auto/basic.json" --deck Geography --model Basic --dry-run
+anki-auto import "$HOME/.local/share/anki-auto/basic.json" --deck Geography --model Basic
 ```
+
+**Windows:**
+
+```powershell
+anki-auto import "$env:LOCALAPPDATA\anki-auto\basic.json" --deck Geography --model Basic --dry-run
+anki-auto import "$env:LOCALAPPDATA\anki-auto\basic.json" --deck Geography --model Basic
+```
+
+For manual downloads, run the extracted binary with `basic.json` from its folder. Source installs include the sample at `tests/fixtures/basic.json` in the repository.
 
 Expect `parsed 1 entry` from the dry run and `1 added` from the import. Open the **Geography** deck in Anki to review your first card. Repeating the import reports `0 added` and `1 skipped (duplicates)`.
 
@@ -254,3 +299,9 @@ Never rely on the default `Japanese` deck for development or testing. The Codex 
 Contributions are welcome through pull requests; see [CONTRIBUTING.md](CONTRIBUTING.md). Changes to `main` require owner review.
 
 Licensed under [MIT](LICENSE).
+
+## Release builds and privacy
+
+Release binaries are built on GitHub-hosted runners, not a maintainer's computer. Release builds strip debug symbols, remap workspace and home-directory paths, and are scanned for embedded build/user paths before packaging. Archives include only the binary, sample JSON, license, and install instructions; Unix archive ownership is normalized. They do not include local Anki collections, credentials, or developer configuration.
+
+Linux builds use static musl linking. Windows builds statically link the C runtime; macOS and Windows still use normal OS libraries. These checks remove personal build paths; generic compiler/source references and platform metadata can remain. SHA-256 checksums detect damaged downloads but are not code-signing certificates. See [the release checklist](docs/RELEASING.md) for the build and verification process.
