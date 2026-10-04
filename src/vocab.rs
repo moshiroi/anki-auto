@@ -1,6 +1,3 @@
-use std::io::Read;
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
@@ -20,31 +17,43 @@ pub fn source_tag(source: &str) -> String {
     format!("src::{slug}")
 }
 
-pub fn load(path: Option<&Path>) -> Result<Vec<VocabEntry>> {
-    let raw = match path {
-        Some(p) => {
-            std::fs::read_to_string(p).with_context(|| format!("failed to read {}", p.display()))?
-        }
-        None => {
-            let mut buf = String::new();
-            std::io::stdin()
-                .read_to_string(&mut buf)
-                .context("failed to read stdin")?;
-            buf
-        }
-    };
-    load_str(&raw)
-}
-
 pub fn load_str(raw: &str) -> Result<Vec<VocabEntry>> {
     let value: Value = serde_json::from_str(raw.trim()).context("input is not valid JSON")?;
-    match value {
+    let entries = match value {
         Value::Array(_) => serde_json::from_value(value).context("invalid vocab list"),
         Value::Object(_) => serde_json::from_value(value)
             .map(|entry: VocabEntry| vec![entry])
             .context("invalid vocab entry"),
         _ => bail!("expected a JSON object or array of objects"),
+    }?;
+    validate(&entries)?;
+    Ok(entries)
+}
+
+fn validate(entries: &[VocabEntry]) -> Result<()> {
+    for (index, entry) in entries.iter().enumerate() {
+        for (field, value) in [
+            ("word", &entry.word),
+            ("reading", &entry.reading),
+            ("meaning", &entry.meaning),
+            ("sentence", &entry.sentence),
+        ] {
+            if value.trim().is_empty() {
+                bail!("entry {} has an empty `{field}` field", index + 1);
+            }
+        }
+        if entry
+            .sentence_meaning
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!(
+                "entry {} has an empty `sentence_meaning`; omit it instead",
+                index + 1
+            );
+        }
     }
+    Ok(())
 }
 
 fn find_with_stem_fallback(word: &str, sentence: &str) -> Option<(usize, usize)> {
@@ -79,7 +88,7 @@ mod tests {
 
     #[test]
     fn parses_array() {
-        let entries = load(Some(Path::new("tests/fixtures/array.json"))).unwrap();
+        let entries = load_str(include_str!("../tests/fixtures/array.json")).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].word, "勉強");
         assert_eq!(entries[1].sentence_meaning, None);
@@ -87,7 +96,7 @@ mod tests {
 
     #[test]
     fn parses_single_object() {
-        let entries = load(Some(Path::new("tests/fixtures/single.json"))).unwrap();
+        let entries = load_str(include_str!("../tests/fixtures/single.json")).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].reading, "みず");
     }
@@ -127,5 +136,22 @@ mod tests {
             source_tag("Comprehensible Japanese 旅"),
             "src::Comprehensible-Japanese-旅"
         );
+    }
+
+    #[test]
+    fn rejects_empty_required_fields() {
+        let error =
+            load_str(r#"{"word":"","reading":"みず","meaning":"water","sentence":"水を飲む。"}"#)
+                .unwrap_err();
+        assert!(error.to_string().contains("empty `word`"));
+    }
+
+    #[test]
+    fn rejects_empty_optional_translation() {
+        let error = load_str(
+            r#"{"word":"水","reading":"みず","meaning":"water","sentence":"水を飲む。","sentence_meaning":" "}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("omit it instead"));
     }
 }

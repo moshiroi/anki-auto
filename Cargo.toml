@@ -2,6 +2,9 @@
 name = "anki-auto"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Import JSON cards into Anki through AnkiConnect"
+repository = "https://github.com/moshiroi/anki-auto"
 
 [dependencies]
 anyhow = "1"
@@ -9,3 +12,9 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "2", features = ["json"] }
+
+[profile.release]
+debug = 0
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
